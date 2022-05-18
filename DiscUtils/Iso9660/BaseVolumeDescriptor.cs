@@ -40,6 +40,8 @@ namespace DiscUtils.Iso9660
         public string StandardIdentifier;
         public byte VolumeDescriptorVersion;
 
+        public const string Iso9660StandardIdentifier = "CD001";
+
         public BaseVolumeDescriptor(VolumeDescriptorType type, byte version)
         {
             VolumeDescriptorType = type;
