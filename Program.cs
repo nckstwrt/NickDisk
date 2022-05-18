@@ -45,14 +45,14 @@ namespace NickDisk
                 Console.WriteLine("Commands:");
                 Console.WriteLine("CreateFloppy floppy.img [/BOOTDISK] [/LABEL:MyLabel]");
                 Console.WriteLine("CreateHD hd.img 100M [/BOOTDISK] [/LABEL:MyLabel] (100M = 100 Megabytes, 4G = 4 Gigabytes, etc)");
+                Console.WriteLine("CreateISO disk.iso PathToDirectory [/BOOTIMAGE:FloppyDisk.img]");
+                Console.WriteLine("Copy PathToFileOrDirectory imageFile.img:/path/to/copy/to [/S] [/LABEL:MyLabel] (/S = copy subdirectories too)");
                 return;
             }
 
             bool createBootDisk = args.Where(x => x.ToUpper().Contains("/BOOTDISK")).Count() > 0;
-            string label = "NICK";
-            if (args.Where(x => x.ToUpper().StartsWith("/LABEL:")).Count() > 0)
-                label = args.First(x => x.ToUpper().StartsWith("/LABEL:")).Substring("/LABEL:".Length);
-
+            string label = GetParam(args, "LABEL", "NICKDISK");
+            
             if (label.Length > 8)
             {
                 Console.WriteLine("Label {0} is too long. Label should be 8 characters or less");
@@ -186,7 +186,7 @@ namespace NickDisk
                     {
                         var srcPath = args[1];
                         var dstPath = args[2];
-                        bool recurseDirectories = args.Where(x => x.ToUpper() == "/S").Count() > 0;
+                        bool recurseDirectories = HasSwitch(args, "S");
                         bool sourceIsDrive = (srcPath.LastIndexOf(':') > 1);
                         bool destIsDrive = (dstPath.LastIndexOf(':') > 1);
                         
@@ -195,16 +195,40 @@ namespace NickDisk
                             // Copy local to a disk drive
                             CopyLocalToDrive(srcPath, dstPath, recurseDirectories);
                         }
-
-                        /*
-                        using (var src = File.Open(args[1], FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
-                        using (var dst = File.Open(args[2], FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite))
-                        {
-
-                        }*/
                     }
                     else
                         Console.WriteLine("Copy requires a Source and a Destination");
+                    break;
+                case "CREATEISO":
+                    if (args.Length >= 3)
+                    {
+                        var isoFile = args[1];
+                        var srcDirectory = args[2];
+                        var bootImage = GetParam(args, "BOOTIMAGE");
+
+                        var builder = new DiscUtils.Iso9660.CDBuilder();
+                        builder.VolumeIdentifier = label;
+                        Stream bootStream = null;
+                        if (!string.IsNullOrEmpty(bootImage))
+                        {
+                            bootStream = File.Open(bootImage, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                            builder.SetBootImage(bootStream, DiscUtils.Iso9660.BootDeviceEmulation.Diskette1440KiB, 0);
+                        }
+
+                        foreach (var fileToCopy in GetFiles(srcDirectory, "*.*", HasSwitch(args, "S")).ToList())
+                        {
+                            var cleanFileToCopy = fileToCopy.Substring(srcDirectory.Length);
+
+                            builder.AddFile(cleanFileToCopy, fileToCopy);
+                        }
+                        
+                        builder.Build(isoFile);
+
+                        if (bootStream != null)
+                            bootStream.Dispose();
+                    }
+                    else
+                        Console.WriteLine("CreateISO requires an iso to write to and a source directory");
                     break;
             }
         }
@@ -367,6 +391,20 @@ namespace NickDisk
         {
             using (var io = ffs.OpenFile(filePath, FileMode.Create, FileAccess.ReadWrite))
                 io.Write(bytes, 0, bytes.Length);
+        }
+
+        static string GetParam(string[] args, string switchname, string defaultValue = null)
+        {
+            switchname = "/" + switchname.ToUpper() + ":";
+            if (args.Where(x => x.ToUpper().StartsWith(switchname)).Count() > 0)
+                defaultValue = args.First(x => x.ToUpper().StartsWith(switchname)).Substring(switchname.Length);
+            return defaultValue;
+        }
+
+        static bool HasSwitch(string [] args, string switchname)
+        {
+            switchname = "/" + switchname.ToUpper();
+            return args.Where(x => x.ToUpper() == switchname).Count() > 0;
         }
     }
 }
