@@ -44,7 +44,7 @@ namespace NickDisk
                 Console.WriteLine();
                 Console.WriteLine("Commands:");
                 Console.WriteLine("CreateFloppy floppy.img [/BOOTDISK] [/LABEL:MyLabel]");
-                Console.WriteLine("CreateHD hd.img 100M [/BOOTDISK] [/LABEL:MyLabel] (100M = 100 Megabytes, 4G = 4 Gigabytes, etc)");
+                Console.WriteLine("CreateHD hd.img 100M [/BOOTDISK] [/LABEL:MyLabel] [/DONOTFORMAT] (100M = 100 Megabytes, 4G = 4 Gigabytes, etc)");
                 Console.WriteLine("CreateISO disk.iso PathToDirectory [/BOOTIMAGE:FloppyDisk.img]");
                 Console.WriteLine("Copy PathToFileOrDirectory imageFile.img:/path/to/copy/to [/S] [/LABEL:MyLabel] (/S = copy subdirectories too)");
                 return;
@@ -112,66 +112,73 @@ namespace NickDisk
                             size *= multiplier;
                             using (FileStream fs = File.Open(args[1], FileMode.Create, FileAccess.ReadWrite, FileShare.ReadWrite))
                             {
-                                var geometry = Geometry.FromCapacity(size);
-                                geometry = geometry.TranslateToBios(GeometryTranslation.Lba);       // Doing Large doesn't work for 5gig??
-                                using (var hd = Disk.Initialize(fs, Ownership.None, size, geometry))
+                                if (HasSwitch(args, "DONOTFORMAT"))
                                 {
-                                    var partitionTable = DiscUtils.Partitions.BiosPartitionTable.Initialize(hd);
-                                    partitionTable.Create(DiscUtils.Partitions.WellKnownPartitionType.WindowsFat, true);
-                                    
-                                    if (createBootDisk)
+                                    fs.SetLength(size);
+                                }
+                                else
+                                {
+                                    var geometry = Geometry.FromCapacity(size);
+                                    geometry = geometry.TranslateToBios(GeometryTranslation.Lba);       // Doing Large doesn't work for 5gig??
+                                    using (var hd = Disk.Initialize(fs, Ownership.None, size, geometry))
                                     {
-                                        var bytes = ReadEmbeddedFile("Win98HDMBR.bin");
-                                        var currentMBR = hd.GetMasterBootRecord();
-                                        for (int i = 0; i < 446; i++)
-                                            currentMBR[i] = bytes[i];
-                                        hd.SetMasterBootRecord(currentMBR);
-                                        hd.Signature = new Random().Next();
-                                    }
+                                        var partitionTable = DiscUtils.Partitions.BiosPartitionTable.Initialize(hd);
+                                        partitionTable.Create(DiscUtils.Partitions.WellKnownPartitionType.WindowsFat, true);
 
-                                    using (var ffs = FatFileSystem.FormatPartition(hd, 0, label))
-                                    {
                                         if (createBootDisk)
                                         {
-
-                                            byte[] bytes = ReadEmbeddedFile("Win98BootSectors.bin");
-                                            
-                                            using (Stream partitionStream = hd.Partitions[0].Open())
-                                            {
-                                                var oldpos = partitionStream.Position;
-                                                int partOffset = 62;
-                                                int sectorsToCopy = 1;
-
-                                                if (hd.Partitions[0].TypeAsString.Contains("FAT32"))
-                                                {
-                                                    bytes = ReadBytes("Win98BootSectors_FAT32.bin");
-                                                    partOffset = 90;
-                                                    partitionStream.Position = 1;
-                                                    partitionStream.Write(new byte[] { 0x58 }, 0, 1);
-                                                    //partitionStream.Position = 0x1A;
-                                                    //partitionStream.Write(new byte[] { 0x80 }, 0, 1);   // <--- Set Heads Per Cylinder to 0x80 (not needed with Large geometry)
-                                                    sectorsToCopy = 3;
-                                                }
-
-                                                partitionStream.Position = partOffset;
-                                                partitionStream.Write(bytes, partOffset, (512 * sectorsToCopy) - partOffset);
-
-                                                // Set our FAT32 Next and Free Cluster to unknown
-                                                if (hd.Partitions[0].TypeAsString.Contains("FAT32"))
-                                                {
-                                                    partitionStream.Position = 512 + 488;
-                                                    partitionStream.Write(new byte[] { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF }, 0, 8);
-                                                }
-                                            }
-
-                                            WriteBytesToFATFile(ffs, "IO.SYS", ReadEmbeddedFile("IO.SYS"));
-                                            ffs.SetAttributes("IO.SYS", FileAttributes.System | FileAttributes.Hidden | FileAttributes.ReadOnly);
-                                            WriteBytesToFATFile(ffs, "MSDOS.SYS", ReadEmbeddedFile("MSDOS.SYS"));
-                                            
-                                            ffs.SetAttributes("MSDOS.SYS", FileAttributes.System | FileAttributes.Hidden | FileAttributes.ReadOnly);
-                                            WriteBytesToFATFile(ffs, "COMMAND.COM", ReadEmbeddedFile("COMMAND.COM"));
+                                            var bytes = ReadEmbeddedFile("Win98HDMBR.bin");
+                                            var currentMBR = hd.GetMasterBootRecord();
+                                            for (int i = 0; i < 446; i++)
+                                                currentMBR[i] = bytes[i];
+                                            hd.SetMasterBootRecord(currentMBR);
+                                            hd.Signature = new Random().Next();
                                         }
-                                        ffs.SetLabel(label);
+
+                                        using (var ffs = FatFileSystem.FormatPartition(hd, 0, label))
+                                        {
+                                            if (createBootDisk)
+                                            {
+
+                                                byte[] bytes = ReadEmbeddedFile("Win98BootSectors.bin");
+
+                                                using (Stream partitionStream = hd.Partitions[0].Open())
+                                                {
+                                                    var oldpos = partitionStream.Position;
+                                                    int partOffset = 62;
+                                                    int sectorsToCopy = 1;
+
+                                                    if (hd.Partitions[0].TypeAsString.Contains("FAT32"))
+                                                    {
+                                                        bytes = ReadBytes("Win98BootSectors_FAT32.bin");
+                                                        partOffset = 90;
+                                                        partitionStream.Position = 1;
+                                                        partitionStream.Write(new byte[] { 0x58 }, 0, 1);
+                                                        //partitionStream.Position = 0x1A;
+                                                        //partitionStream.Write(new byte[] { 0x80 }, 0, 1);   // <--- Set Heads Per Cylinder to 0x80 (not needed with Large geometry)
+                                                        sectorsToCopy = 3;
+                                                    }
+
+                                                    partitionStream.Position = partOffset;
+                                                    partitionStream.Write(bytes, partOffset, (512 * sectorsToCopy) - partOffset);
+
+                                                    // Set our FAT32 Next and Free Cluster to unknown
+                                                    if (hd.Partitions[0].TypeAsString.Contains("FAT32"))
+                                                    {
+                                                        partitionStream.Position = 512 + 488;
+                                                        partitionStream.Write(new byte[] { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF }, 0, 8);
+                                                    }
+                                                }
+
+                                                WriteBytesToFATFile(ffs, "IO.SYS", ReadEmbeddedFile("IO.SYS"));
+                                                ffs.SetAttributes("IO.SYS", FileAttributes.System | FileAttributes.Hidden | FileAttributes.ReadOnly);
+                                                WriteBytesToFATFile(ffs, "MSDOS.SYS", ReadEmbeddedFile("MSDOS.SYS"));
+
+                                                ffs.SetAttributes("MSDOS.SYS", FileAttributes.System | FileAttributes.Hidden | FileAttributes.ReadOnly);
+                                                WriteBytesToFATFile(ffs, "COMMAND.COM", ReadEmbeddedFile("COMMAND.COM"));
+                                            }
+                                            ffs.SetLabel(label);
+                                        }
                                     }
                                 }
                             }
@@ -188,10 +195,13 @@ namespace NickDisk
                         var dstPath = args[2];
                         bool recurseDirectories = HasSwitch(args, "S");
                         bool sourceIsDrive = (srcPath.LastIndexOf(':') > 1);
-                        bool destIsDrive = (dstPath.LastIndexOf(':') > 1);
                         
-                        if (!sourceIsDrive && destIsDrive)
+                        if (!sourceIsDrive)
                         {
+                            // iF just a image file add a root path on it
+                            if (dstPath.LastIndexOf(':') <= 0)
+                                dstPath += ":\\";
+
                             // Copy local to a disk drive
                             CopyLocalToDrive(srcPath, dstPath, recurseDirectories);
                         }
@@ -282,7 +292,7 @@ namespace NickDisk
                         // If path does not exist and copying multiple files create a directory
                         if (!dfs.Exists(imgPath) && filesToCopy.Count() > 1)
                             dfs.CreateDirectory(imgPath);
-                        bool imgPathIsDir = (dfs.Exists(imgPath) && (dfs.GetAttributes(imgPath) & FileAttributes.Directory) == FileAttributes.Directory);
+                        bool imgPathIsDir = (dfs.Exists(imgPath) && (dfs.GetAttributes(imgPath) & FileAttributes.Directory) == FileAttributes.Directory) || imgPath == "\\";
                         
                         foreach (var fileToCopy in filesToCopy)
                         {
@@ -294,7 +304,7 @@ namespace NickDisk
                                 var remoteFullPath = remoteDir + "\\" + remoteFile;
 
                                 // Clean the Remote Path
-                                remoteFullPath = remoteFullPath.Replace("\\\\", "\\").TrimEnd('\\');
+                                remoteFullPath = TrimTrailingBackSlash(remoteFullPath.Replace("\\\\", "\\"));
 
                                 Console.WriteLine("Copying file {0} -> {1}", fileToCopy, remoteFullPath);
 
@@ -310,6 +320,13 @@ namespace NickDisk
             }
             else
                 Console.WriteLine("No files found in directory {0} filter {1} to copy", srcPathRoot, Path.GetFileName(srcPath));
+        }
+
+        static string TrimTrailingBackSlash(string s)
+        {
+            if (s.Length > 1 && s[s.Length - 1] == '\\')
+                s = s.Substring(0, s.Length - 1);
+            return s;
         }
 
         static IEnumerable<string> GetFiles(string path, string searchPatten, bool recurseDirectories)
