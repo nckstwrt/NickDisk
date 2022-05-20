@@ -902,7 +902,6 @@
     <EmbeddedResource Include="DOS.zip" />
   </ItemGroup>
   <ItemGroup>
-    <EmbeddedResource Include="DiscUtils\obj\Debug\DiscUtils.Resources.resources" />
     <EmbeddedResource Include="DiscUtils\Resources.resx" />
   </ItemGroup>
   <ItemGroup>
