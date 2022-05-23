@@ -16,22 +16,22 @@ Copy PathToFileOrDirectory imageFile.img:/path/to/copy/to [/S] (/S = copy subdir
 ## Examples
 #### Example 1:
 ````
-CreateFloppy floppy.img /BOOTDISK /LABEL:MYDISK
+NickDisk CreateFloppy floppy.img /BOOTDISK /LABEL:MYDISK
 ````
 Will create a new 1.44mb floppy disk image with  Windows 98 DOS boot files and the label MYDISK
 #### Example 2:
 ````
-CreateHD hd.img 5G /DONOTFORMAT
+NickDisk CreateHD hd.img 5G /DONOTFORMAT
 ````
 Will create a blank file (all zeroes internally that's 5Gb big). If /DONOTFORMAT is not included it will be forwarded to FAT16 or FAT32 depending on the size.
 #### Example 3:
 ````
-CreateISO newISO.iso c:\somedirectory /BOOTIMAGE:Floppy.img
+NickDisk CreateISO newISO.iso c:\somedirectory /BOOTIMAGE:Floppy.img
 ````
 Will create a new ISO file with all the files and directories from some directory. Bootimage should be a bootable 1.44mb floppy disk image.
 #### Example 4:
 ````
-Copy c:\directory\*.txt myhd.img:\TEXTDIR /S
+NickDisk Copy c:\directory\*.txt myhd.img:\TEXTDIR /S
 ````
 Copies all files in the directory c:\directory (and its sub directories) that are txt files to the sub directory \TEXTDIR in the image
 
