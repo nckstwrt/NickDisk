@@ -15,29 +15,6 @@ namespace NickDisk
     {
         static void Main(string[] args)
         {
-            /*
-            using (var f = File.OpenRead(@"C:\development\NickDisk\NickDisk\bin\Debug\3g_gd.img"))
-            {
-                byte[] bytes = new byte[512];
-                f.Read(bytes, 0, 512);
-                using (var fout = File.Create(@"C:\ChampMan\cm9798\QEMU\Win98HDMBR.bin"))
-                    fout.Write(bytes, 0, 512);
-            }
-            */
-            /*
-            var bootBytes = new byte[512 * 3];
-            using (var goodDisk = new Disk(@"C:\development\NickDisk\NickDisk\bin\Debug\freshblank_good.img"))
-            {
-                using (var part0 = goodDisk.Partitions[0].Open())
-                {
-                    part0.Position = 0;
-                    part0.Read(bootBytes, 0, bootBytes.Length);
-                    using (var fout = File.Create(@"C:\development\NickDisk\NickDisk\bin\Debug\Win98BootSectors_FAT32.bin"))
-                        fout.Write(bootBytes, 0, bootBytes.Length);
-                }
-            }
-            */
-
             if (args.Length < 2)
             {
                 Console.WriteLine("NickDisk <Command> <Param1> <Param2> ...");
@@ -150,12 +127,10 @@ namespace NickDisk
 
                                                     if (hd.Partitions[0].TypeAsString.Contains("FAT32"))
                                                     {
-                                                        bytes = ReadBytes("Win98BootSectors_FAT32.bin");
+                                                        bytes = ReadEmbeddedFile("Win98BootSectors_FAT32.bin");
                                                         partOffset = 90;
                                                         partitionStream.Position = 1;
                                                         partitionStream.Write(new byte[] { 0x58 }, 0, 1);
-                                                        //partitionStream.Position = 0x1A;
-                                                        //partitionStream.Write(new byte[] { 0x80 }, 0, 1);   // <--- Set Heads Per Cylinder to 0x80 (not needed with Large geometry)
                                                         sectorsToCopy = 3;
                                                     }
 
@@ -239,6 +214,9 @@ namespace NickDisk
                     }
                     else
                         Console.WriteLine("CreateISO requires an iso to write to and a source directory");
+                    break;
+                default:
+                    Console.WriteLine("Command {0} not recognised!", args[0]);
                     break;
             }
         }
@@ -374,18 +352,6 @@ namespace NickDisk
             int idx = path.LastIndexOf(':');
             imgFile = path.Substring(0, idx);
             imgPath = path.Substring(idx + 1);
-        }
-
-        static byte[] ReadBytes(string file, int pos = 0, int size = 0)
-        {
-            using (var f = File.Open(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
-            using (var br = new BinaryReader(f))
-            {
-                f.Position = pos;
-                if (size == 0)
-                    size = (int)(f.Length - f.Position);
-                return br.ReadBytes(size);
-            }
         }
 
         static byte[] ReadEmbeddedFile(string file)
