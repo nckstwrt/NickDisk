@@ -46,7 +46,7 @@ namespace NickDisk
                 Console.WriteLine("CreateFloppy floppy.img [/BOOTDISK] [/LABEL:MyLabel]");
                 Console.WriteLine("CreateHD hd.img 100M [/BOOTDISK] [/LABEL:MyLabel] [/DONOTFORMAT] (100M = 100 Megabytes, 4G = 4 Gigabytes, etc)");
                 Console.WriteLine("CreateISO disk.iso PathToDirectory [/BOOTIMAGE:FloppyDisk.img]");
-                Console.WriteLine("Copy PathToFileOrDirectory imageFile.img:/path/to/copy/to [/S] [/LABEL:MyLabel] (/S = copy subdirectories too)");
+                Console.WriteLine("Copy PathToFileOrDirectory imageFile.img:/path/to/copy/to [/S] (/S = copy subdirectories too)");
                 return;
             }
 
