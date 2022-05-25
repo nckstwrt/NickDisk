@@ -23,7 +23,7 @@ Will create a new 1.44mb floppy disk image with  Windows 98 DOS boot files and t
 ````
 NickDisk CreateHD hd.img 5G /DONOTFORMAT
 ````
-Will create a blank file (all zeroes internally that's 5Gb big). If /DONOTFORMAT is not included it will be forwarded to FAT16 or FAT32 depending on the size.
+Will create a blank file (all zeroes internally that's 5Gb big). If /DONOTFORMAT is not included it will be formatted to FAT16 or FAT32 depending on the size.
 #### Example 3:
 ````
 NickDisk CreateISO newISO.iso c:\somedirectory /BOOTIMAGE:Floppy.img
