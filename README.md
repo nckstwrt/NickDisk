@@ -10,7 +10,7 @@ Commands:
 CreateFloppy floppy.img [/BOOTDISK] [/LABEL:MyLabel]
 CreateHD hd.img 100M [/BOOTDISK] [/LABEL:MyLabel] [/DONOTFORMAT] (100M = 100 Mb, 4G = 4 Gb, etc)
 CreateISO disk.iso PathToDirectory [/BOOTIMAGE:FloppyDisk.img]
-Copy PathToFileOrDirectory imageFile.img:/path/to/copy/to [/S] (/S = copy subdirectories too)
+Copy PathToFileOrDirectory imageFile.img:\path\to\copy\to [/S] (/S = copy subdirectories too)
 ```
 
 ## Examples
