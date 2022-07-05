@@ -1,5 +1,5 @@
 # NickDisk
-#### C# Commandline Utility For Formatting/Copying To Raw FAT32 Disks
+#### C# Commandline Utility For Formatting/Copying To Raw FAT Disks
 
 This is a small tool I built for dealing with DOS and Windows raw image files as used when running virtual machines in QEMU, DosBox, etc.
 I wanted a tool that could easily build disks, make them bootable where need be, and most importantly allow me to copy files to them easily.
