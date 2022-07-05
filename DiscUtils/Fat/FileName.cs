@@ -25,7 +25,7 @@ namespace DiscUtils.Fat
     using System;
     using System.Text;
 
-    internal sealed class FileName : IEquatable<FileName>
+    internal class FileName : IEquatable<FileName>
     {
         public static readonly FileName SelfEntryName = new FileName(new byte[] { 0x2E, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20 }, 0);
         public static readonly FileName ParentEntryName = new FileName(new byte[] { 0x2E, 0x2E, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20 }, 0);
@@ -155,6 +155,8 @@ namespace DiscUtils.Fat
         {
             Array.Copy(_raw, 0, data, offset, 11);
         }
+
+        protected byte[] Raw { get { return _raw; } }
 
         public override bool Equals(object other)
         {

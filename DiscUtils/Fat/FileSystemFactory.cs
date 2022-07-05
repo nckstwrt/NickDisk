@@ -23,6 +23,7 @@
 namespace DiscUtils.Fat
 {
     using System.IO;
+    using DiscUtils.Vfat;
     using DiscUtils.Vfs;
 
     [VfsFileSystemFactory]
@@ -40,7 +41,9 @@ namespace DiscUtils.Fat
 
         private DiscFileSystem Open(Stream stream, VolumeInfo volumeInfo, FileSystemParameters parameters)
         {
-            return new FatFileSystem(stream, Ownership.None, parameters);
+            // Nick - force to use VfatFileSystem
+            //return new FatFileSystem(stream, Ownership.None, parameters);
+            return new VfatFileSystem(stream);
         }
     }
 }

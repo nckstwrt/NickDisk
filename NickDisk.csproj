@@ -719,6 +719,11 @@
     <Compile Include="DiscUtils\Vdi\ImageFlags.cs" />
     <Compile Include="DiscUtils\Vdi\ImageType.cs" />
     <Compile Include="DiscUtils\Vdi\PreHeaderRecord.cs" />
+    <Compile Include="DiscUtils\Vfat\VfatDirectory.cs" />
+    <Compile Include="DiscUtils\Vfat\VfatDirectoryEntry.cs" />
+    <Compile Include="DiscUtils\Vfat\VfatFileName.cs" />
+    <Compile Include="DiscUtils\Vfat\VfatFileSystem.cs" />
+    <Compile Include="DiscUtils\Vfat\VfatFileSystemOptions.cs" />
     <Compile Include="DiscUtils\Vfs\IVfsDirectory.cs" />
     <Compile Include="DiscUtils\Vfs\IVfsFile.cs" />
     <Compile Include="DiscUtils\Vfs\IVfsSymlink.cs" />

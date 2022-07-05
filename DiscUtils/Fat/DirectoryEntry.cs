@@ -87,6 +87,8 @@ namespace DiscUtils.Fat
             }
         }
 
+        internal byte Attr { get { return _attr; } }
+
         public FatAttributes Attributes
         {
             get { return (FatAttributes)_attr; }
@@ -142,7 +144,7 @@ namespace DiscUtils.Fat
             }
         }
 
-        internal void WriteTo(Stream stream)
+        internal virtual void WriteTo(Stream stream)
         {
             byte[] buffer = new byte[32];
 

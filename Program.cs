@@ -23,10 +23,9 @@ namespace NickDisk
                 Console.WriteLine("CreateFloppy floppy.img [/BOOTDISK] [/LABEL:MyLabel]");
                 Console.WriteLine("CreateHD hd.img 100M [/BOOTDISK] [/LABEL:MyLabel] [/DONOTFORMAT] (100M = 100 Megabytes, 4G = 4 Gigabytes, etc)");
                 Console.WriteLine("CreateISO disk.iso PathToDirectory [/BOOTIMAGE:FloppyDisk.img]");
-                Console.WriteLine("Copy PathToFileOrDirectory imageFile.img:/path/to/copy/to [/S] (/S = copy subdirectories too)");
+                Console.WriteLine(@"Copy PathToFileOrDirectory imageFile.img:\path\to\copy\to [/S] (/S = copy subdirectories too)");
                 return;
             }
-
             bool createBootDisk = args.Where(x => x.ToUpper().Contains("/BOOTDISK")).Count() > 0;
             string label = GetParam(args, "LABEL", "NICKDISK");
             
@@ -200,7 +199,7 @@ namespace NickDisk
                             builder.SetBootImage(bootStream, DiscUtils.Iso9660.BootDeviceEmulation.Diskette1440KiB, 0);
                         }
 
-                        foreach (var fileToCopy in GetFiles(srcDirectory, "*.*", HasSwitch(args, "S")).ToList())
+                        foreach (var fileToCopy in GetFiles(srcDirectory, "*.*", true).ToList())
                         {
                             var cleanFileToCopy = fileToCopy.Substring(srcDirectory.Length);
 

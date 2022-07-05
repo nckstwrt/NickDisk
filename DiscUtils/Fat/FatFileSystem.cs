@@ -20,61 +20,53 @@
 // DEALINGS IN THE SOFTWARE.
 //
 
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
+using System.Text;
+using System.Text.RegularExpressions;
+
 namespace DiscUtils.Fat
 {
-    using System;
-    using System.Collections.Generic;
-    using System.Globalization;
-    using System.IO;
-    using System.Text;
-    using System.Text.RegularExpressions;
-
     /// <summary>
     /// Class for accessing FAT file systems.
     /// </summary>
-    public sealed class FatFileSystem : DiscFileSystem
+    public class FatFileSystem : DiscFileSystem
     {
         /// <summary>
         /// The Epoch for FAT file systems (1st Jan, 1980).
         /// </summary>
         public static readonly DateTime Epoch = new DateTime(1980, 1, 1);
 
-        private TimeConverter _timeConverter;
-        private Stream _data;
-        private Ownership _ownsData;
-        private byte[] _bootSector;
-        private FileAllocationTable _fat;
-        private ClusterReader _clusterReader;
-        private Directory _rootDir;
-        private Dictionary<uint, Directory> _dirCache;
+        private readonly Dictionary<uint, Directory> _dirCache;
+        private readonly Ownership _ownsData;
 
-        private FatType _type;
-        private string _bpbOEMName;
+        private readonly TimeConverter _timeConverter;
+        private byte[] _bootSector;
+        private ushort _bpbBkBootSec;
+
         private ushort _bpbBytesPerSec;
-        private byte _bpbSecPerClus;
-        private ushort _bpbRsvdSecCnt;
-        private byte _bpbNumFATs;
-        private ushort _bpbRootEntCnt;
-        private ushort _bpbTotSec16;
-        private byte _bpbMedia;
+        private ushort _bpbExtFlags;
         private ushort _bpbFATSz16;
-        private ushort _bpbSecPerTrk;
-        private ushort _bpbNumHeads;
+
+        private uint _bpbFATSz32;
+        private ushort _bpbFSInfo;
+        private ushort _bpbFSVer;
         private uint _bpbHiddSec;
+        private ushort _bpbNumHeads;
+        private uint _bpbRootClus;
+        private ushort _bpbRootEntCnt;
+        private ushort _bpbRsvdSecCnt;
+        private ushort _bpbSecPerTrk;
+        private ushort _bpbTotSec16;
         private uint _bpbTotSec32;
 
-        private byte _bsDrvNum;
         private byte _bsBootSig;
         private uint _bsVolId;
         private string _bsVolLab;
-        private string _bsFilSysType;
-
-        private uint _bpbFATSz32;
-        private ushort _bpbExtFlags;
-        private ushort _bpbFSVer;
-        private uint _bpbRootClus;
-        private ushort _bpbFSInfo;
-        private ushort _bpbBkBootSec;
+        private Stream _data;
+        private Directory _rootDir;
 
         /// <summary>
         /// Initializes a new instance of the FatFileSystem class.
@@ -85,6 +77,22 @@ namespace DiscUtils.Fat
         /// </remarks>
         public FatFileSystem(Stream data)
             : base(new FatFileSystemOptions())
+        {
+            _dirCache = new Dictionary<uint, Directory>();
+            _timeConverter = DefaultTimeConverter;
+            Initialize(data);
+        }
+
+        /// <summary>
+        /// Initializes a new instance of the FatFileSystem class.
+        /// </summary>
+        /// <param name="data">The stream containing the file system.</param>
+        /// <param name="fileSystemOptions">The file system options.</param>
+        /// <remarks>
+        /// Local time is the effective timezone of the new instance.
+        /// </remarks>
+        internal FatFileSystem(Stream data, DiscFileSystemOptions fileSystemOptions)
+            : base(fileSystemOptions)
         {
             _dirCache = new Dictionary<uint, Directory>();
             _timeConverter = DefaultTimeConverter;
@@ -163,48 +171,28 @@ namespace DiscUtils.Fat
             _ownsData = ownsData;
         }
 
-        private delegate void EntryUpdateAction(DirectoryEntry entry);
+        internal Directory RootDir {  get { return _rootDir;  } }
 
         /// <summary>
-        /// Gets the FAT file system options, which can be modified.
+        /// Gets the active FAT (zero-based index).
         /// </summary>
-        public FatFileSystemOptions FatOptions
+        public byte ActiveFat
         {
-            get { return (FatFileSystemOptions)Options; }
+            get { return (byte)((_bpbExtFlags & 0x08) != 0 ? _bpbExtFlags & 0x7 : 0); }
         }
 
         /// <summary>
-        /// Gets the FAT variant of the file system.
+        /// Gets the Sector location of the backup boot sector (FAT32 only).
         /// </summary>
-        public FatType FatVariant
+        public int BackupBootSector
         {
-            get { return _type; }
+            get { return _bpbBkBootSec; }
         }
 
         /// <summary>
-        /// Gets the friendly name for the file system, including FAT variant.
+        /// Gets the BIOS drive number for BIOS Int 13h calls.
         /// </summary>
-        public override string FriendlyName
-        {
-            get
-            {
-                switch (_type)
-                {
-                    case FatType.Fat12: return "Microsoft FAT12";
-                    case FatType.Fat16: return "Microsoft FAT16";
-                    case FatType.Fat32: return "Microsoft FAT32";
-                    default: return "Unknown FAT";
-                }
-            }
-        }
-
-        /// <summary>
-        /// Gets the OEM name from the file system.
-        /// </summary>
-        public string OemName
-        {
-            get { return _bpbOEMName; }
-        }
+        public byte BiosDriveNumber { get; private set; }
 
         /// <summary>
         /// Gets the number of bytes per sector (as stored in the file-system meta data).
@@ -215,51 +203,37 @@ namespace DiscUtils.Fat
         }
 
         /// <summary>
-        /// Gets the number of contiguous sectors that make up one cluster.
+        /// Indicates if this file system is read-only or read-write.
         /// </summary>
-        public byte SectorsPerCluster
+        /// <returns>.</returns>
+        public override bool CanWrite
         {
-            get { return _bpbSecPerClus; }
+            get { return _data.CanWrite; }
         }
 
+        internal ClusterReader ClusterReader { get; private set; }
+
         /// <summary>
-        /// Gets the number of reserved sectors at the start of the disk.
+        /// Gets a value indicating whether the VolumeId, VolumeLabel and FileSystemType fields are valid.
         /// </summary>
-        public int ReservedSectorCount
+        public bool ExtendedBootSignaturePresent
         {
-            get { return _bpbRsvdSecCnt; }
+            get { return _bsBootSig == 0x29; }
         }
+
+        internal FileAllocationTable Fat { get; private set; }
 
         /// <summary>
         /// Gets the number of FATs present.
         /// </summary>
-        public byte FatCount
-        {
-            get { return _bpbNumFATs; }
-        }
+        public byte FatCount { get; private set; }
 
         /// <summary>
-        /// Gets the maximum number of root directory entries (on FAT variants that have a limit).
+        /// Gets the FAT file system options, which can be modified.
         /// </summary>
-        public int MaxRootDirectoryEntries
+        public FatFileSystemOptions FatOptions
         {
-            get { return _bpbRootEntCnt; }
-        }
-
-        /// <summary>
-        /// Gets the total number of sectors on the disk.
-        /// </summary>
-        public long TotalSectors
-        {
-            get { return (_bpbTotSec16 != 0) ? _bpbTotSec16 : _bpbTotSec32; }
-        }
-
-        /// <summary>
-        /// Gets the Media marker byte, which indicates fixed or removable media.
-        /// </summary>
-        public byte Media
-        {
-            get { return _bpbMedia; }
+            get { return (FatFileSystemOptions)Options; }
         }
 
         /// <summary>
@@ -267,15 +241,46 @@ namespace DiscUtils.Fat
         /// </summary>
         public long FatSize
         {
-            get { return (_bpbFATSz16 != 0) ? _bpbFATSz16 : _bpbFATSz32; }
+            get { return _bpbFATSz16 != 0 ? _bpbFATSz16 : _bpbFATSz32; }
         }
 
         /// <summary>
-        /// Gets the number of sectors per logical track.
+        /// Gets the FAT variant of the file system.
         /// </summary>
-        public int SectorsPerTrack
+        public FatType FatVariant { get; private set; }
+
+        /// <summary>
+        /// Gets the (informational only) file system type recorded in the meta-data.
+        /// </summary>
+        public string FileSystemType { get; private set; }
+
+        /// <summary>
+        /// Gets the friendly name for the file system, including FAT variant.
+        /// </summary>
+        public override string FriendlyName
         {
-            get { return _bpbSecPerTrk; }
+            get
+            {
+                switch (FatVariant)
+                {
+                    case FatType.Fat12:
+                        return "Microsoft FAT12";
+                    case FatType.Fat16:
+                        return "Microsoft FAT16";
+                    case FatType.Fat32:
+                        return "Microsoft FAT32";
+                    default:
+                        return "Unknown FAT";
+                }
+            }
+        }
+
+        /// <summary>
+        /// Gets the sector location of the FSINFO structure (FAT32 only).
+        /// </summary>
+        public int FSInfoSector
+        {
+            get { return _bpbFSInfo; }
         }
 
         /// <summary>
@@ -295,19 +300,74 @@ namespace DiscUtils.Fat
         }
 
         /// <summary>
-        /// Gets the BIOS drive number for BIOS Int 13h calls.
+        /// Gets the maximum number of root directory entries (on FAT variants that have a limit).
         /// </summary>
-        public byte BiosDriveNumber
+        public int MaxRootDirectoryEntries
         {
-            get { return _bsDrvNum; }
+            get { return _bpbRootEntCnt; }
         }
 
         /// <summary>
-        /// Gets a value indicating whether the VolumeId, VolumeLabel and FileSystemType fields are valid.
+        /// Gets the Media marker byte, which indicates fixed or removable media.
         /// </summary>
-        public bool ExtendedBootSignaturePresent
+        public byte Media { get; private set; }
+
+        /// <summary>
+        /// Gets a value indicating whether FAT changes are mirrored to all copies of the FAT.
+        /// </summary>
+        public bool MirrorFat
         {
-            get { return _bsBootSig == 0x29; }
+            get { return (_bpbExtFlags & 0x08) == 0; }
+        }
+
+        /// <summary>
+        /// Gets the OEM name from the file system.
+        /// </summary>
+        public string OemName { get; private set; }
+
+        /// <summary>
+        /// Gets the number of reserved sectors at the start of the disk.
+        /// </summary>
+        public int ReservedSectorCount
+        {
+            get { return _bpbRsvdSecCnt; }
+        }
+
+        /// <summary>
+        /// Gets the cluster number of the first cluster of the root directory (FAT32 only).
+        /// </summary>
+        public long RootDirectoryCluster
+        {
+            get { return _bpbRootClus; }
+        }
+
+        /// <summary>
+        /// Gets the number of contiguous sectors that make up one cluster.
+        /// </summary>
+        public byte SectorsPerCluster { get; private set; }
+
+        /// <summary>
+        /// Gets the number of sectors per logical track.
+        /// </summary>
+        public int SectorsPerTrack
+        {
+            get { return _bpbSecPerTrk; }
+        }
+
+        /// <summary>
+        /// Gets the total number of sectors on the disk.
+        /// </summary>
+        public long TotalSectors
+        {
+            get { return _bpbTotSec16 != 0 ? _bpbTotSec16 : _bpbTotSec32; }
+        }
+
+        /// <summary>
+        /// Gets the file-system version (usually 0).
+        /// </summary>
+        public int Version
+        {
+            get { return _bpbFSVer; }
         }
 
         /// <summary>
@@ -330,329 +390,9 @@ namespace DiscUtils.Fat
                 {
                     return _bsVolLab;
                 }
-                else
-                {
-                    return _rootDir.GetEntry(volId).Name.GetRawName(FatOptions.FileNameEncoding);
-                }
+                return _rootDir.GetEntry(volId).Name.GetRawName(FatOptions.FileNameEncoding);
             }
         }
-
-        /// <summary>
-        /// Gets the (informational only) file system type recorded in the meta-data.
-        /// </summary>
-        public string FileSystemType
-        {
-            get { return _bsFilSysType; }
-        }
-
-        /// <summary>
-        /// Gets the active FAT (zero-based index).
-        /// </summary>
-        public byte ActiveFat
-        {
-            get { return (byte)(((_bpbExtFlags & 0x08) != 0) ? _bpbExtFlags & 0x7 : 0); }
-        }
-
-        /// <summary>
-        /// Gets a value indicating whether FAT changes are mirrored to all copies of the FAT.
-        /// </summary>
-        public bool MirrorFat
-        {
-            get { return (_bpbExtFlags & 0x08) == 0; }
-        }
-
-        /// <summary>
-        /// Gets the file-system version (usually 0).
-        /// </summary>
-        public int Version
-        {
-            get { return _bpbFSVer; }
-        }
-
-        /// <summary>
-        /// Gets the cluster number of the first cluster of the root directory (FAT32 only).
-        /// </summary>
-        public long RootDirectoryCluster
-        {
-            get { return _bpbRootClus; }
-        }
-
-        /// <summary>
-        /// Gets the sector location of the FSINFO structure (FAT32 only).
-        /// </summary>
-        public int FSInfoSector
-        {
-            get { return _bpbFSInfo; }
-        }
-
-        /// <summary>
-        /// Gets the Sector location of the backup boot sector (FAT32 only).
-        /// </summary>
-        public int BackupBootSector
-        {
-            get { return _bpbBkBootSec; }
-        }
-
-        /// <summary>
-        /// Indicates if this file system is read-only or read-write.
-        /// </summary>
-        /// <returns>.</returns>
-        public override bool CanWrite
-        {
-            get { return _data.CanWrite; }
-        }
-
-        internal FileAllocationTable Fat
-        {
-            get { return _fat; }
-        }
-
-        internal ClusterReader ClusterReader
-        {
-            get { return _clusterReader; }
-        }
-
-        #region Disk Formatting
-        /// <summary>
-        /// Creates a formatted floppy disk image in a stream.
-        /// </summary>
-        /// <param name="stream">The stream to write the blank image to.</param>
-        /// <param name="type">The type of floppy to create.</param>
-        /// <param name="label">The volume label for the floppy (or null).</param>
-        /// <returns>An object that provides access to the newly created floppy disk image.</returns>
-        public static FatFileSystem FormatFloppy(Stream stream, FloppyDiskType type, string label)
-        {
-            long pos = stream.Position;
-
-            long ticks = DateTime.UtcNow.Ticks;
-            uint volId = (uint)((ticks & 0xFFFF) | (ticks >> 32));
-
-            // Write the BIOS Parameter Block (BPB) - a single sector
-            byte[] bpb = new byte[512];
-            uint sectors;
-            if (type == FloppyDiskType.DoubleDensity)
-            {
-                sectors = 1440;
-                WriteBPB(bpb, sectors, FatType.Fat12, 224, 0, 1, 1, new Geometry(80, 2, 9), true, volId, label);
-            }
-            else if (type == FloppyDiskType.HighDensity)
-            {
-                sectors = 2880;
-                WriteBPB(bpb, sectors, FatType.Fat12, 224, 0, 1, 1, new Geometry(80, 2, 18), true, volId, label);
-            }
-            else if (type == FloppyDiskType.Extended)
-            {
-                sectors = 5760;
-                WriteBPB(bpb, sectors, FatType.Fat12, 224, 0, 1, 1, new Geometry(80, 2, 36), true, volId, label);
-            }
-            else
-            {
-                throw new ArgumentException("Unrecognised Floppy Disk type", "type");
-            }
-
-            stream.Write(bpb, 0, bpb.Length);
-
-            // Write both FAT copies
-            uint fatSize = CalcFatSize(sectors, FatType.Fat12, 1);
-            byte[] fat = new byte[fatSize * Utilities.SectorSize];
-            FatBuffer fatBuffer = new FatBuffer(FatType.Fat12, fat);
-            fatBuffer.SetNext(0, 0xFFFFFFF0);
-            fatBuffer.SetEndOfChain(1);
-            stream.Write(fat, 0, fat.Length);
-            stream.Write(fat, 0, fat.Length);
-
-            // Write the (empty) root directory
-            uint rootDirSectors = ((224 * 32) + Utilities.SectorSize - 1) / Utilities.SectorSize;
-            byte[] rootDir = new byte[rootDirSectors * Utilities.SectorSize];
-            stream.Write(rootDir, 0, rootDir.Length);
-
-            // Write a single byte at the end of the disk to ensure the stream is at least as big
-            // as needed for this disk image.
-            stream.Position = pos + (sectors * Utilities.SectorSize) - 1;
-            stream.WriteByte(0);
-
-            // Give the caller access to the new file system
-            stream.Position = pos;
-            return new FatFileSystem(stream);
-        }
-
-        /// <summary>
-        /// Formats a virtual hard disk partition.
-        /// </summary>
-        /// <param name="disk">The disk containing the partition.</param>
-        /// <param name="partitionIndex">The index of the partition on the disk.</param>
-        /// <param name="label">The volume label for the partition (or null).</param>
-        /// <returns>An object that provides access to the newly created partition file system.</returns>
-        public static FatFileSystem FormatPartition(VirtualDisk disk, int partitionIndex, string label)
-        {
-            using (Stream partitionStream = disk.Partitions[partitionIndex].Open())
-            {
-                return FormatPartition(
-                    partitionStream,
-                    label,
-                    disk.Geometry,
-                    (int)disk.Partitions[partitionIndex].FirstSector,
-                    (int)(1 + disk.Partitions[partitionIndex].LastSector - disk.Partitions[partitionIndex].FirstSector),
-                    0);
-            }
-        }
-
-        /// <summary>
-        /// Creates a formatted hard disk partition in a stream.
-        /// </summary>
-        /// <param name="stream">The stream to write the new file system to.</param>
-        /// <param name="label">The volume label for the partition (or null).</param>
-        /// <param name="diskGeometry">The geometry of the disk containing the partition.</param>
-        /// <param name="firstSector">The starting sector number of this partition (hide's sectors in other partitions).</param>
-        /// <param name="sectorCount">The number of sectors in this partition.</param>
-        /// <param name="reservedSectors">The number of reserved sectors at the start of the partition.</param>
-        /// <returns>An object that provides access to the newly created partition file system.</returns>
-        public static FatFileSystem FormatPartition(
-            Stream stream,
-            string label,
-            Geometry diskGeometry,
-            int firstSector,
-            int sectorCount,
-            short reservedSectors)
-        {
-            long pos = stream.Position;
-
-            long ticks = DateTime.UtcNow.Ticks;
-            uint volId = (uint)((ticks & 0xFFFF) | (ticks >> 32));
-
-            byte sectorsPerCluster;
-            FatType fatType;
-            ushort maxRootEntries;
-
-            /*
-             * Write the BIOS Parameter Block (BPB) - a single sector
-             */
-
-            byte[] bpb = new byte[512];
-            if (sectorCount <= 8400)
-            {
-                throw new ArgumentException("Requested size is too small for a partition");
-            }
-            else if (sectorCount < 1024 * 1024)
-            {
-                fatType = FatType.Fat16;
-                maxRootEntries = 512;
-                if (sectorCount <= 32680)
-                {
-                    sectorsPerCluster = 2;
-                }
-                else if (sectorCount <= 262144)
-                {
-                    sectorsPerCluster = 4;
-                }
-                else if (sectorCount <= 524288)
-                {
-                    sectorsPerCluster = 8;
-                }
-                else
-                {
-                    sectorsPerCluster = 16;
-                }
-
-                if (reservedSectors < 1)
-                {
-                    reservedSectors = 1;
-                }
-            }
-            else
-            {
-                fatType = FatType.Fat32;
-                maxRootEntries = 0;
-                if (sectorCount <= 532480)
-                {
-                    sectorsPerCluster = 1;
-                }
-                else if (sectorCount <= 16777216)
-                {
-                    sectorsPerCluster = 8;
-                }
-                else if (sectorCount <= 33554432)
-                {
-                    sectorsPerCluster = 16;
-                }
-                else if (sectorCount <= 67108864)
-                {
-                    sectorsPerCluster = 32;
-                }
-                else
-                {
-                    sectorsPerCluster = 64;
-                }
-
-                if (reservedSectors < 32)
-                {
-                    reservedSectors = 32;
-                }
-            }
-
-            WriteBPB(bpb, (uint)sectorCount, fatType, maxRootEntries, (uint)firstSector, (ushort)reservedSectors, sectorsPerCluster, diskGeometry, false, volId, label);
-            stream.Write(bpb, 0, bpb.Length);
-
-            /*
-             * Skip the reserved sectors
-             */
-
-            stream.Position = pos + (((ushort)reservedSectors) * Utilities.SectorSize);
-
-            /*
-             * Write both FAT copies
-             */
-
-            byte[] fat = new byte[CalcFatSize((uint)sectorCount, fatType, sectorsPerCluster) * Utilities.SectorSize];
-            FatBuffer fatBuffer = new FatBuffer(fatType, fat);
-            fatBuffer.SetNext(0, 0xFFFFFFF8);
-            fatBuffer.SetEndOfChain(1);
-            if (fatType >= FatType.Fat32)
-            {
-                // Mark cluster 2 as End-of-chain (i.e. root directory
-                // is a single cluster in length)
-                fatBuffer.SetEndOfChain(2);
-                // Nick ^ This causes scandisk to think there's a 16384 bad allocation somewhere
-                // UPDATE: Now it needs this to work ?!!?
-            }
-
-            stream.Write(fat, 0, fat.Length);
-            stream.Write(fat, 0, fat.Length);
-
-            /*
-             * Write the (empty) root directory
-             */
-
-            uint rootDirSectors;
-            if (fatType < FatType.Fat32)
-            {
-                rootDirSectors = (uint)(((maxRootEntries * 32) + Utilities.SectorSize - 1) / Utilities.SectorSize);
-            }
-            else
-            {
-                rootDirSectors = sectorsPerCluster;
-            }
-
-            byte[] rootDir = new byte[rootDirSectors * Utilities.SectorSize];
-            stream.Write(rootDir, 0, rootDir.Length);
-
-            /*
-             * Make sure the stream is at least as large as the partition requires.
-             */
-
-            if (stream.Length < pos + (sectorCount * Utilities.SectorSize))
-            {
-                stream.SetLength(pos + (sectorCount * Utilities.SectorSize));
-            }
-
-            /*
-             * Give the caller access to the new file system
-             */
-
-            stream.Position = pos;
-            return new FatFileSystem(stream);
-        }
-        #endregion
 
         /// <summary>
         /// Detects if a stream contains a FAT file system.
@@ -728,10 +468,7 @@ namespace DiscUtils.Fat
             {
                 throw new IOException("Attempt to open directory as a file");
             }
-            else
-            {
-                return parent.OpenFile(dirEntry.Name, mode, access);
-            }
+            return parent.OpenFile(dirEntry.Name, mode, access);
         }
 
         /// <summary>
@@ -830,7 +567,7 @@ namespace DiscUtils.Fat
                 return;
             }
 
-            UpdateDirEntry(path, (e) => { e.CreationTime = newTime; });
+            UpdateDirEntry(path, e => { e.CreationTime = newTime; });
         }
 
         /// <summary>
@@ -865,7 +602,7 @@ namespace DiscUtils.Fat
                 return;
             }
 
-            UpdateDirEntry(path, (e) => { e.CreationTime = ConvertFromUtc(newTime); });
+            UpdateDirEntry(path, e => { e.CreationTime = ConvertFromUtc(newTime); });
         }
 
         /// <summary>
@@ -900,7 +637,7 @@ namespace DiscUtils.Fat
                 return;
             }
 
-            UpdateDirEntry(path, (e) => { e.LastAccessTime = newTime; });
+            UpdateDirEntry(path, e => { e.LastAccessTime = newTime; });
         }
 
         /// <summary>
@@ -935,7 +672,7 @@ namespace DiscUtils.Fat
                 return;
             }
 
-            UpdateDirEntry(path, (e) => { e.LastAccessTime = ConvertFromUtc(newTime); });
+            UpdateDirEntry(path, e => { e.LastAccessTime = ConvertFromUtc(newTime); });
         }
 
         /// <summary>
@@ -970,7 +707,7 @@ namespace DiscUtils.Fat
                 return;
             }
 
-            UpdateDirEntry(path, (e) => { e.LastWriteTime = newTime; });
+            UpdateDirEntry(path, e => { e.LastWriteTime = newTime; });
         }
 
         /// <summary>
@@ -1005,7 +742,7 @@ namespace DiscUtils.Fat
                 return;
             }
 
-            UpdateDirEntry(path, (e) => { e.LastWriteTime = ConvertFromUtc(newTime); });
+            UpdateDirEntry(path, e => { e.LastWriteTime = ConvertFromUtc(newTime); });
         }
 
         /// <summary>
@@ -1031,7 +768,8 @@ namespace DiscUtils.Fat
 
             if (sourceDir == null || sourceEntryId < 0)
             {
-                throw new FileNotFoundException(string.Format(CultureInfo.InvariantCulture, "The source file '{0}' was not found", sourceFile));
+                throw new FileNotFoundException(string.Format(CultureInfo.InvariantCulture,
+                    "The source file '{0}' was not found", sourceFile));
             }
 
             DirectoryEntry sourceEntry = sourceDir.GetEntry(sourceEntryId);
@@ -1050,7 +788,8 @@ namespace DiscUtils.Fat
 
             if (destDir == null)
             {
-                throw new DirectoryNotFoundException(string.Format(CultureInfo.InvariantCulture, "The destination directory for '{0}' was not found", destinationFile));
+                throw new DirectoryNotFoundException(string.Format(CultureInfo.InvariantCulture,
+                    "The destination directory for '{0}' was not found", destinationFile));
             }
 
             // If the destination is a directory, use the old file name to construct a full path.
@@ -1090,7 +829,7 @@ namespace DiscUtils.Fat
 
             // Copy the contents...
             using (Stream sourceStream = new FatFileStream(this, sourceDir, sourceEntryId, FileAccess.Read),
-                destStream = new FatFileStream(this, destDir, destEntryId, FileAccess.Write))
+                          destStream = new FatFileStream(this, destDir, destEntryId, FileAccess.Write))
             {
                 Utilities.PumpStreams(sourceStream, destStream);
             }
@@ -1102,7 +841,7 @@ namespace DiscUtils.Fat
         /// <param name="path">The directory to create.</param>
         public override void CreateDirectory(string path)
         {
-            string[] pathElements = path.Split(new char[] { '\\' }, StringSplitOptions.RemoveEmptyEntries);
+            string[] pathElements = path.Split(new[] { '\\' }, StringSplitOptions.RemoveEmptyEntries);
 
             Directory focusDir = _rootDir;
 
@@ -1137,7 +876,8 @@ namespace DiscUtils.Fat
             Directory dir = GetDirectory(path);
             if (dir == null)
             {
-                throw new DirectoryNotFoundException(String.Format(CultureInfo.InvariantCulture, "No such directory: {0}", path));
+                throw new DirectoryNotFoundException(string.Format(CultureInfo.InvariantCulture,
+                    "No such directory: {0}", path));
             }
 
             if (!dir.IsEmpty)
@@ -1151,7 +891,7 @@ namespace DiscUtils.Fat
             {
                 throw new IOException("Unable to delete root directory");
             }
-            else if (parent != null && id >= 0)
+            if (parent != null && id >= 0)
             {
                 DirectoryEntry deadEntry = parent.GetEntry(id);
                 parent.DeleteEntry(id, true);
@@ -1193,15 +933,12 @@ namespace DiscUtils.Fat
         public override bool DirectoryExists(string path)
         {
             // Special case - root directory
-            if (String.IsNullOrEmpty(path))
+            if (string.IsNullOrEmpty(path))
             {
                 return true;
             }
-            else
-            {
-                DirectoryEntry dirEntry = GetDirectoryEntry(path);
-                return dirEntry != null && (dirEntry.Attributes & FatAttributes.Directory) != 0;
-            }
+            DirectoryEntry dirEntry = GetDirectoryEntry(path);
+            return dirEntry != null && (dirEntry.Attributes & FatAttributes.Directory) != 0;
         }
 
         /// <summary>
@@ -1212,15 +949,12 @@ namespace DiscUtils.Fat
         public override bool FileExists(string path)
         {
             // Special case - root directory
-            if (String.IsNullOrEmpty(path))
+            if (string.IsNullOrEmpty(path))
             {
                 return true;
             }
-            else
-            {
-                DirectoryEntry dirEntry = GetDirectoryEntry(path);
-                return dirEntry != null && (dirEntry.Attributes & FatAttributes.Directory) == 0;
-            }
+            DirectoryEntry dirEntry = GetDirectoryEntry(path);
+            return dirEntry != null && (dirEntry.Attributes & FatAttributes.Directory) == 0;
         }
 
         /// <summary>
@@ -1231,14 +965,11 @@ namespace DiscUtils.Fat
         public override bool Exists(string path)
         {
             // Special case - root directory
-            if (String.IsNullOrEmpty(path))
+            if (string.IsNullOrEmpty(path))
             {
                 return true;
             }
-            else
-            {
-                return GetDirectoryEntry(path) != null;
-            }
+            return GetDirectoryEntry(path) != null;
         }
 
         /// <summary>
@@ -1251,7 +982,8 @@ namespace DiscUtils.Fat
             Directory dir = GetDirectory(path);
             if (dir == null)
             {
-                throw new DirectoryNotFoundException(string.Format(CultureInfo.InvariantCulture, "The directory '{0}' was not found", path));
+                throw new DirectoryNotFoundException(string.Format(CultureInfo.InvariantCulture,
+                    "The directory '{0}' was not found", path));
             }
 
             DirectoryEntry[] entries = dir.GetDirectories();
@@ -1373,12 +1105,9 @@ namespace DiscUtils.Fat
             {
                 if (destinationDirectoryName == null)
                 {
-                    throw new ArgumentNullException("destinationDirectoryName");
+                    throw new ArgumentNullException(nameof(destinationDirectoryName));
                 }
-                else
-                {
-                    throw new ArgumentException("Invalid destination name (empty string)");
-                }
+                throw new ArgumentException("Invalid destination name (empty string)");
             }
 
             Directory destParent;
@@ -1387,7 +1116,7 @@ namespace DiscUtils.Fat
             {
                 throw new DirectoryNotFoundException("Target directory doesn't exist");
             }
-            else if (destId >= 0)
+            if (destId >= 0)
             {
                 throw new IOException("Target directory already exists");
             }
@@ -1399,7 +1128,8 @@ namespace DiscUtils.Fat
                 throw new IOException("Source directory doesn't exist");
             }
 
-            destParent.AttachChildDirectory(FileName.FromPath(destinationDirectoryName, FatOptions.FileNameEncoding), GetDirectory(sourceDirectoryName));
+            destParent.AttachChildDirectory(FileName.FromPath(destinationDirectoryName, FatOptions.FileNameEncoding),
+                GetDirectory(sourceDirectoryName));
             sourceParent.DeleteEntry(sourceId, false);
         }
 
@@ -1416,7 +1146,8 @@ namespace DiscUtils.Fat
 
             if (sourceDir == null || sourceEntryId < 0)
             {
-                throw new FileNotFoundException(string.Format(CultureInfo.InvariantCulture, "The source file '{0}' was not found", sourceName));
+                throw new FileNotFoundException(string.Format(CultureInfo.InvariantCulture,
+                    "The source file '{0}' was not found", sourceName));
             }
 
             DirectoryEntry sourceEntry = sourceDir.GetEntry(sourceEntryId);
@@ -1434,7 +1165,8 @@ namespace DiscUtils.Fat
 
             if (destDir == null)
             {
-                throw new DirectoryNotFoundException(string.Format(CultureInfo.InvariantCulture, "The destination directory for '{0}' was not found", destinationName));
+                throw new DirectoryNotFoundException(string.Format(CultureInfo.InvariantCulture,
+                    "The destination directory for '{0}' was not found", destinationName));
             }
 
             // If the destination is a directory, use the old file name to construct a full path.
@@ -1508,10 +1240,7 @@ namespace DiscUtils.Fat
             {
                 return GetDirectory(parent, id);
             }
-            else
-            {
-                return null;
-            }
+            return null;
         }
 
         internal Directory GetDirectory(Directory parent, long parentId)
@@ -1535,9 +1264,19 @@ namespace DiscUtils.Fat
             }
 
             // Not cached - create a new one.
-            result = new Directory(parent, parentId);
+            result = DirectoryFactory(parent, parentId);
             _dirCache[dirEntry.FirstCluster] = result;
             return result;
+        }
+
+        internal virtual Directory DirectoryFactory(Directory parent, long parentId)
+        {
+            return new Directory(parent, parentId);
+        }
+
+        internal virtual Directory DirectoryFactory(Stream fatStream)
+        {
+            return new Directory(this, fatStream);
         }
 
         internal void ForgetDirectory(DirectoryEntry entry)
@@ -1649,7 +1388,7 @@ namespace DiscUtils.Fat
             bootSector[16] = 2;
 
             // Number of Entries in the root directory
-            Utilities.WriteBytesLittleEndian((ushort)maxRootEntries, bootSector, 17);
+            Utilities.WriteBytesLittleEndian(maxRootEntries, bootSector, 17);
 
             // Total number of sectors (small)
             Utilities.WriteBytesLittleEndian((ushort)(sectors < 0x10000 ? sectors : 0), bootSector, 19);
@@ -1667,10 +1406,10 @@ namespace DiscUtils.Fat
             Utilities.WriteBytesLittleEndian((ushort)diskGeometry.HeadsPerCylinder, bootSector, 26);
 
             // Hidden Sectors
-            Utilities.WriteBytesLittleEndian((uint)hiddenSectors, bootSector, 28);
+            Utilities.WriteBytesLittleEndian(hiddenSectors, bootSector, 28);
 
             // Total number of sectors (large)
-            Utilities.WriteBytesLittleEndian((uint)(sectors >= 0x10000 ? sectors : 0), bootSector, 32);
+            Utilities.WriteBytesLittleEndian(sectors >= 0x10000 ? sectors : 0, bootSector, 32);
 
             if (fatType < FatType.Fat32)
             {
@@ -1679,7 +1418,7 @@ namespace DiscUtils.Fat
             else
             {
                 // FAT size (FAT32)
-                Utilities.WriteBytesLittleEndian((uint)fatSectors, bootSector, 36);
+                Utilities.WriteBytesLittleEndian(fatSectors, bootSector, 36);
 
                 // Ext flags: 0x80 = FAT 1 (i.e. Zero) active, mirroring
                 bootSector[40] = 0x00;
@@ -1710,12 +1449,13 @@ namespace DiscUtils.Fat
 
         private static uint CalcFatSize(uint sectors, FatType fatType, byte sectorsPerCluster)
         {
-            uint numClusters = (uint)(sectors / sectorsPerCluster);
-            uint fatBytes = (numClusters * (ushort)fatType) / 8;
-            return (fatBytes + Utilities.SectorSize - 1) / Utilities.SectorSize;
+            uint numClusters = sectors / sectorsPerCluster;
+            uint fatBytes = numClusters * (ushort)fatType / 8;
+            return (fatBytes + Sizes.Sector - 1) / Sizes.Sector;
         }
 
-        private static void WriteBS(byte[] bootSector, int offset, bool isFloppy, uint volId, string label, FatType fatType)
+        private static void WriteBS(byte[] bootSector, int offset, bool isFloppy, uint volId, string label,
+                                    FatType fatType)
         {
             if (string.IsNullOrEmpty(label))
             {
@@ -1763,25 +1503,22 @@ namespace DiscUtils.Fat
             uint bpbNumFATs = bpb[16];
             uint bpbSecPerClus = bpb[13];
 
-            uint rootDirSectors = ((bpbRootEntCnt * 32) + bpbBytesPerSec - 1) / bpbBytesPerSec;
-            uint fatSz = (bpbFATSz16 != 0) ? (uint)bpbFATSz16 : bpbFATSz32;
-            uint totalSec = (bpbTotSec16 != 0) ? (uint)bpbTotSec16 : bpbTotSec32;
+            uint rootDirSectors = (bpbRootEntCnt * 32 + bpbBytesPerSec - 1) / bpbBytesPerSec;
+            uint fatSz = bpbFATSz16 != 0 ? bpbFATSz16 : bpbFATSz32;
+            uint totalSec = bpbTotSec16 != 0 ? bpbTotSec16 : bpbTotSec32;
 
-            uint dataSec = totalSec - (bpbResvdSecCnt + (bpbNumFATs * fatSz) + rootDirSectors);
+            uint dataSec = totalSec - (bpbResvdSecCnt + bpbNumFATs * fatSz + rootDirSectors);
             uint countOfClusters = dataSec / bpbSecPerClus;
 
             if (countOfClusters < 4085)
             {
                 return FatType.Fat12;
             }
-            else if (countOfClusters < 65525)
+            if (countOfClusters < 65525)
             {
                 return FatType.Fat16;
             }
-            else
-            {
-                return FatType.Fat32;
-            }
+            return FatType.Fat32;
         }
 
         private static bool IsRootPath(string path)
@@ -1800,7 +1537,7 @@ namespace DiscUtils.Fat
             _data.Position = 0;
             _bootSector = Utilities.ReadSector(_data);
 
-            _type = DetectFATType(_bootSector);
+            FatVariant = DetectFATType(_bootSector);
 
             ReadBPB();
 
@@ -1813,48 +1550,49 @@ namespace DiscUtils.Fat
 
         private void LoadClusterReader()
         {
-            int rootDirSectors = ((_bpbRootEntCnt * 32) + (_bpbBytesPerSec - 1)) / _bpbBytesPerSec;
-            int firstDataSector = (int)(_bpbRsvdSecCnt + (_bpbNumFATs * FatSize) + rootDirSectors);
-            _clusterReader = new ClusterReader(_data, firstDataSector, _bpbSecPerClus, _bpbBytesPerSec);
+            int rootDirSectors = (_bpbRootEntCnt * 32 + (_bpbBytesPerSec - 1)) / _bpbBytesPerSec;
+            int firstDataSector = (int)(_bpbRsvdSecCnt + FatCount * FatSize + rootDirSectors);
+            ClusterReader = new ClusterReader(_data, firstDataSector, SectorsPerCluster, _bpbBytesPerSec);
         }
 
         private void LoadRootDirectory()
         {
             Stream fatStream;
-            if (_type != FatType.Fat32)
+            if (FatVariant != FatType.Fat32)
             {
-                fatStream = new SubStream(_data, (_bpbRsvdSecCnt + (_bpbNumFATs * _bpbFATSz16)) * _bpbBytesPerSec, _bpbRootEntCnt * 32);
+                fatStream = new SubStream(_data, (_bpbRsvdSecCnt + FatCount * _bpbFATSz16) * _bpbBytesPerSec,
+                    _bpbRootEntCnt * 32);
             }
             else
             {
                 fatStream = new ClusterStream(this, FileAccess.ReadWrite, _bpbRootClus, uint.MaxValue);
             }
 
-            _rootDir = new Directory(this, fatStream);
+            _rootDir = DirectoryFactory(fatStream);
         }
 
         private void LoadFAT()
         {
-            _fat = new FileAllocationTable(_type, _data, _bpbRsvdSecCnt, (uint)FatSize, (byte)FatCount, ActiveFat);
+            Fat = new FileAllocationTable(FatVariant, _data, _bpbRsvdSecCnt, (uint)FatSize, FatCount, ActiveFat);
         }
 
         private void ReadBPB()
         {
-            _bpbOEMName = Encoding.ASCII.GetString(_bootSector, 3, 8).TrimEnd('\0');
+            OemName = Encoding.ASCII.GetString(_bootSector, 3, 8).TrimEnd('\0');
             _bpbBytesPerSec = Utilities.ToUInt16LittleEndian(_bootSector, 11);
-            _bpbSecPerClus = _bootSector[13];
+            SectorsPerCluster = _bootSector[13];
             _bpbRsvdSecCnt = Utilities.ToUInt16LittleEndian(_bootSector, 14);
-            _bpbNumFATs = _bootSector[16];
+            FatCount = _bootSector[16];
             _bpbRootEntCnt = Utilities.ToUInt16LittleEndian(_bootSector, 17);
             _bpbTotSec16 = Utilities.ToUInt16LittleEndian(_bootSector, 19);
-            _bpbMedia = _bootSector[21];
+            Media = _bootSector[21];
             _bpbFATSz16 = Utilities.ToUInt16LittleEndian(_bootSector, 22);
             _bpbSecPerTrk = Utilities.ToUInt16LittleEndian(_bootSector, 24);
             _bpbNumHeads = Utilities.ToUInt16LittleEndian(_bootSector, 26);
             _bpbHiddSec = Utilities.ToUInt32LittleEndian(_bootSector, 28);
             _bpbTotSec32 = Utilities.ToUInt32LittleEndian(_bootSector, 32);
 
-            if (_type != FatType.Fat32)
+            if (FatVariant != FatType.Fat32)
             {
                 ReadBS(36);
             }
@@ -1872,16 +1610,16 @@ namespace DiscUtils.Fat
 
         private void ReadBS(int offset)
         {
-            _bsDrvNum = _bootSector[offset];
+            BiosDriveNumber = _bootSector[offset];
             _bsBootSig = _bootSector[offset + 2];
             _bsVolId = Utilities.ToUInt32LittleEndian(_bootSector, offset + 3);
             _bsVolLab = Encoding.ASCII.GetString(_bootSector, offset + 7, 11);
-            _bsFilSysType = Encoding.ASCII.GetString(_bootSector, offset + 18, 8);
+            FileSystemType = Encoding.ASCII.GetString(_bootSector, offset + 18, 8);
         }
 
-        private long GetDirectoryEntry(Directory dir, string path, out Directory parent)
+        internal long GetDirectoryEntry(Directory dir, string path, out Directory parent)
         {
-            string[] pathElements = path.Split(new char[] { '\\' }, StringSplitOptions.RemoveEmptyEntries);
+            string[] pathElements = path.Split(new[] { '\\' }, StringSplitOptions.RemoveEmptyEntries);
             return GetDirectoryEntry(dir, pathElements, 0, out parent);
         }
 
@@ -1895,32 +1633,28 @@ namespace DiscUtils.Fat
                 parent = null;
                 return 0;
             }
-            else
+            entryId = dir.FindEntry(FileNameFactory(pathEntries[pathOffset]));
+            if (entryId >= 0)
             {
-                entryId = dir.FindEntry(new FileName(pathEntries[pathOffset], FatOptions.FileNameEncoding));
-                if (entryId >= 0)
-                {
-                    if (pathOffset == pathEntries.Length - 1)
-                    {
-                        parent = dir;
-                        return entryId;
-                    }
-                    else
-                    {
-                        return GetDirectoryEntry(GetDirectory(dir, entryId), pathEntries, pathOffset + 1, out parent);
-                    }
-                }
-                else if (pathOffset == pathEntries.Length - 1)
+                if (pathOffset == pathEntries.Length - 1)
                 {
                     parent = dir;
-                    return -1;
+                    return entryId;
                 }
-                else
-                {
-                    parent = null;
-                    return -1;
-                }
+                return GetDirectoryEntry(GetDirectory(dir, entryId), pathEntries, pathOffset + 1, out parent);
             }
+            if (pathOffset == pathEntries.Length - 1)
+            {
+                parent = dir;
+                return -1;
+            }
+            parent = null;
+            return -1;
+        }
+
+        internal virtual FileName FileNameFactory(string name)
+        {
+            return new FileName(name, FatOptions.FileNameEncoding);
         }
 
         private void DoSearch(List<string> results, string path, Regex regex, bool subFolders, bool dirs, bool files)
@@ -1928,7 +1662,8 @@ namespace DiscUtils.Fat
             Directory dir = GetDirectory(path);
             if (dir == null)
             {
-                throw new DirectoryNotFoundException(string.Format(CultureInfo.InvariantCulture, "The directory '{0}' was not found", path));
+                throw new DirectoryNotFoundException(string.Format(CultureInfo.InvariantCulture,
+                    "The directory '{0}' was not found", path));
             }
 
             DirectoryEntry[] entries = dir.Entries;
@@ -1947,7 +1682,8 @@ namespace DiscUtils.Fat
 
                 if (subFolders && isDir)
                 {
-                    DoSearch(results, Utilities.CombinePaths(path, de.Name.GetDisplayName(FatOptions.FileNameEncoding)), regex, subFolders, dirs, files);
+                    DoSearch(results, Utilities.CombinePaths(path, de.Name.GetDisplayName(FatOptions.FileNameEncoding)),
+                        regex, subFolders, dirs, files);
                 }
             }
         }
@@ -1977,7 +1713,8 @@ namespace DiscUtils.Fat
         /// <summary>
         /// Used space of the Filesystem in bytes
         /// </summary>
-        public override long UsedSpace {
+        public override long UsedSpace
+        {
             get
             {
                 uint usedCluster = 0;
@@ -1997,5 +1734,255 @@ namespace DiscUtils.Fat
         /// Available space of the Filesystem in bytes
         /// </summary>
         public override long AvailableSpace { get { return Size - UsedSpace; } }
+
+        private delegate void EntryUpdateAction(DirectoryEntry entry);
+
+#region Disk Formatting
+
+        /// <summary>
+        /// Creates a formatted floppy disk image in a stream.
+        /// </summary>
+        /// <param name="stream">The stream to write the blank image to.</param>
+        /// <param name="type">The type of floppy to create.</param>
+        /// <param name="label">The volume label for the floppy (or null).</param>
+        /// <returns>An object that provides access to the newly created floppy disk image.</returns>
+        public static FatFileSystem FormatFloppy(Stream stream, FloppyDiskType type, string label)
+        {
+            FormatStream(stream, type, label);
+            return new FatFileSystem(stream);
+        }
+
+        protected static void FormatStream(Stream stream, FloppyDiskType type, string label)
+        {
+            long pos = stream.Position;
+
+            long ticks = DateTime.UtcNow.Ticks;
+            uint volId = (uint)((ticks & 0xFFFF) | (ticks >> 32));
+
+            // Write the BIOS Parameter Block (BPB) - a single sector
+            byte[] bpb = new byte[512];
+            uint sectors;
+            if (type == FloppyDiskType.DoubleDensity)
+            {
+                sectors = 1440;
+                WriteBPB(bpb, sectors, FatType.Fat12, 224, 0, 1, 1, new Geometry(80, 2, 9), true, volId, label);
+            }
+            else if (type == FloppyDiskType.HighDensity)
+            {
+                sectors = 2880;
+                WriteBPB(bpb, sectors, FatType.Fat12, 224, 0, 1, 1, new Geometry(80, 2, 18), true, volId, label);
+            }
+            else if (type == FloppyDiskType.Extended)
+            {
+                sectors = 5760;
+                WriteBPB(bpb, sectors, FatType.Fat12, 224, 0, 1, 1, new Geometry(80, 2, 36), true, volId, label);
+            }
+            else
+            {
+                throw new ArgumentException("Unrecognised Floppy Disk type", nameof(type));
+            }
+
+            stream.Write(bpb, 0, bpb.Length);
+
+            // Write both FAT copies
+            uint fatSize = CalcFatSize(sectors, FatType.Fat12, 1);
+            byte[] fat = new byte[fatSize * Sizes.Sector];
+            FatBuffer fatBuffer = new FatBuffer(FatType.Fat12, fat);
+            fatBuffer.SetNext(0, 0xFFFFFFF0);
+            fatBuffer.SetEndOfChain(1);
+            stream.Write(fat, 0, fat.Length);
+            stream.Write(fat, 0, fat.Length);
+
+            // Write the (empty) root directory
+            uint rootDirSectors = (224 * 32 + Sizes.Sector - 1) / Sizes.Sector;
+            byte[] rootDir = new byte[rootDirSectors * Sizes.Sector];
+            stream.Write(rootDir, 0, rootDir.Length);
+
+            // Write a single byte at the end of the disk to ensure the stream is at least as big
+            // as needed for this disk image.
+            stream.Position = pos + sectors * Sizes.Sector - 1;
+            stream.WriteByte(0);
+
+            // Give the caller access to the new file system
+            stream.Position = pos;
+        }
+
+        /// <summary>
+        /// Formats a virtual hard disk partition.
+        /// </summary>
+        /// <param name="disk">The disk containing the partition.</param>
+        /// <param name="partitionIndex">The index of the partition on the disk.</param>
+        /// <param name="label">The volume label for the partition (or null).</param>
+        /// <returns>An object that provides access to the newly created partition file system.</returns>
+        public static FatFileSystem FormatPartition(VirtualDisk disk, int partitionIndex, string label)
+        {
+            using (Stream partitionStream = disk.Partitions[partitionIndex].Open())
+            {
+                return FormatPartition(
+                    partitionStream,
+                    label,
+                    disk.Geometry,
+                    (int)disk.Partitions[partitionIndex].FirstSector,
+                    (int)(1 + disk.Partitions[partitionIndex].LastSector - disk.Partitions[partitionIndex].FirstSector),
+                    0);
+            }
+        }
+
+        /// <summary>
+        /// Creates a formatted hard disk partition in a stream.
+        /// </summary>
+        /// <param name="stream">The stream to write the new file system to.</param>
+        /// <param name="label">The volume label for the partition (or null).</param>
+        /// <param name="diskGeometry">The geometry of the disk containing the partition.</param>
+        /// <param name="firstSector">The starting sector number of this partition (hide's sectors in other partitions).</param>
+        /// <param name="sectorCount">The number of sectors in this partition.</param>
+        /// <param name="reservedSectors">The number of reserved sectors at the start of the partition.</param>
+        /// <returns>An object that provides access to the newly created partition file system.</returns>
+        public static FatFileSystem FormatPartition(
+            Stream stream,
+            string label,
+            Geometry diskGeometry,
+            int firstSector,
+            int sectorCount,
+            short reservedSectors)
+        {
+            long pos = stream.Position;
+
+            long ticks = DateTime.UtcNow.Ticks;
+            uint volId = (uint)((ticks & 0xFFFF) | (ticks >> 32));
+
+            byte sectorsPerCluster;
+            FatType fatType;
+            ushort maxRootEntries;
+
+            /*
+             * Write the BIOS Parameter Block (BPB) - a single sector
+             */
+
+            byte[] bpb = new byte[512];
+            if (sectorCount <= 8400)
+            {
+                throw new ArgumentException("Requested size is too small for a partition");
+            }
+            if (sectorCount < 1024 * 1024)
+            {
+                fatType = FatType.Fat16;
+                maxRootEntries = 512;
+                if (sectorCount <= 32680)
+                {
+                    sectorsPerCluster = 2;
+                }
+                else if (sectorCount <= 262144)
+                {
+                    sectorsPerCluster = 4;
+                }
+                else if (sectorCount <= 524288)
+                {
+                    sectorsPerCluster = 8;
+                }
+                else
+                {
+                    sectorsPerCluster = 16;
+                }
+
+                if (reservedSectors < 1)
+                {
+                    reservedSectors = 1;
+                }
+            }
+            else
+            {
+                fatType = FatType.Fat32;
+                maxRootEntries = 0;
+                if (sectorCount <= 532480)
+                {
+                    sectorsPerCluster = 1;
+                }
+                else if (sectorCount <= 16777216)
+                {
+                    sectorsPerCluster = 8;
+                }
+                else if (sectorCount <= 33554432)
+                {
+                    sectorsPerCluster = 16;
+                }
+                else if (sectorCount <= 67108864)
+                {
+                    sectorsPerCluster = 32;
+                }
+                else
+                {
+                    sectorsPerCluster = 64;
+                }
+
+                if (reservedSectors < 32)
+                {
+                    reservedSectors = 32;
+                }
+            }
+
+            WriteBPB(bpb, (uint)sectorCount, fatType, maxRootEntries, (uint)firstSector, (ushort)reservedSectors,
+                sectorsPerCluster, diskGeometry, false, volId, label);
+            stream.Write(bpb, 0, bpb.Length);
+
+            /*
+             * Skip the reserved sectors
+             */
+
+            stream.Position = pos + (ushort)reservedSectors * Sizes.Sector;
+
+            /*
+             * Write both FAT copies
+             */
+
+            byte[] fat = new byte[CalcFatSize((uint)sectorCount, fatType, sectorsPerCluster) * Sizes.Sector];
+            FatBuffer fatBuffer = new FatBuffer(fatType, fat);
+            fatBuffer.SetNext(0, 0xFFFFFFF8);
+            fatBuffer.SetEndOfChain(1);
+            if (fatType >= FatType.Fat32)
+            {
+                // Mark cluster 2 as End-of-chain (i.e. root directory
+                // is a single cluster in length)
+                fatBuffer.SetEndOfChain(2);
+            }
+
+            stream.Write(fat, 0, fat.Length);
+            stream.Write(fat, 0, fat.Length);
+
+            /*
+             * Write the (empty) root directory
+             */
+
+            uint rootDirSectors;
+            if (fatType < FatType.Fat32)
+            {
+                rootDirSectors = (uint)((maxRootEntries * 32 + Sizes.Sector - 1) / Sizes.Sector);
+            }
+            else
+            {
+                rootDirSectors = sectorsPerCluster;
+            }
+
+            byte[] rootDir = new byte[rootDirSectors * Sizes.Sector];
+            stream.Write(rootDir, 0, rootDir.Length);
+
+            /*
+             * Make sure the stream is at least as large as the partition requires.
+             */
+
+            if (stream.Length < pos + sectorCount * Sizes.Sector)
+            {
+                stream.SetLength(pos + sectorCount * Sizes.Sector);
+            }
+
+            /*
+             * Give the caller access to the new file system
+             */
+
+            stream.Position = pos;
+            return new FatFileSystem(stream);
+        }
+
+#endregion
     }
 }
